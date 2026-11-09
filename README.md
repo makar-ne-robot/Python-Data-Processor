@@ -196,7 +196,7 @@ that the logic can be reused from scripts, notebooks and tests.
 ### Linux / macOS
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/makar-ne-robot/Python-Data-Processor
 cd Python_Data_Processor
 
 python3 -m venv .venv
@@ -215,7 +215,7 @@ pip install -r requirements-dev.txt
 ### Windows (PowerShell)
 
 ```powershell
-git clone <your-repository-url>
+git clone https://github.com/makar-ne-robot/Python-Data-Processor
 cd Python_Data_Processor
 
 py -m venv .venv
