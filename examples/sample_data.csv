@@ -1,0 +1,34 @@
+customer_id,full_name,age,city,signup_date,revenue,segment,notes
+1001,Alice Johnson,34,London,2023-01-15,1250.50,Premium,Loyal customer
+1002,Bob Smith,45,New York,2023-02-03,890.00,Standard,
+1003,Carla Diaz,29,Madrid,2023-02-20,1520.75,Premium,Interested in upgrades
+1003,Carla Diaz,29,Madrid,2023-02-20,1520.75,Premium,Interested in upgrades
+1004,David Kim,,Seoul,2023-03-05,,Basic,
+1005,Emma Brown,41,Berlin,2023-03-18,640.20,Standard,
+1006,Farid Hassan,38,Dubai,2023-04-01,2100.00,Enterprise,High value
+1007,Grace Lee,27,Singapore,2023-04-12,315.40,Basic,
+1008,Hugo Martin,52,Paris,2023-04-28,1780.00,Premium,
+1009,Irene Novak,31,Prague,,420.00,Standard,
+1010,Jamal Wright,24,Chicago,2023-05-09,275.90,Basic,New customer
+1011,Kira Petrova,36,Moscow,2023-05-22,990.00,Standard,
+1012,Liam O'Brien,47,Dublin,2023-06-01,1340.25,Premium,Referred a friend
+1013,Mia Chen,19,Taipei,2023-06-14,,Basic,
+1014,Noah Garcia,40,Mexico City,2023-06-27,870.00,Standard,
+1015,Olga Ivanova,,Moscow,2023-07-08,560.50,Basic,
+1016,Paul Müller,33,Munich,2023-07-19,1440.00,Premium,=SUM(A1:A2)
+1017,Quinn Taylor,28,Sydney,2023-07-30,760.00,Standard,
+1018,Rosa Martinez,55,Barcelona,2023-08-11,1920.00,Enterprise,
+1019,Sam Wilson,22,Toronto,2023-08-23,210.00,Basic,Trial
+1020,Tara Singh,39,Mumbai,2023-09-02,680.00,Standard,
+1021,Umberto Rossi,44,Rome,2023-09-15,1150.00,Premium,
+1022,Vera Sokolova,30,Kyiv,2023-09-27,590.75,Basic,
+1023,Wei Zhang,48,Shanghai,2023-10-06,1750.00,Enterprise,VIP
+1024,Xena Papadopoulos,26,Athens,2023-10-19,330.00,Basic,
+1025,Yuri Tanaka,37,Tokyo,2023-10-31,1290.00,Premium,
+1026,Zara Ahmed,35,Cairo,2023-11-12,,Standard,
+1027,Adam Nowak,43,Warsaw,2023-11-24,810.00,Standard,
+1028,Bianca Silva,21,Lisbon,2023-12-05,150.00,Basic,Student
+1029,Carlos Lopez,50,Bogotá,2023-12-17,1620.00,Premium,
+1030,Dana Cohen,32,Tel Aviv,2023-12-29,940.00,Standard,
+1008,Hugo Martin,52,Paris,2023-04-28,1780.00,Premium,
+1015,Olga Ivanova,,Moscow,2023-07-08,560.50,Basic,
