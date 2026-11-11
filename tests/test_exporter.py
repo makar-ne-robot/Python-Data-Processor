@@ -102,3 +102,115 @@ def test_export_preserves_column_order() -> None:
     frame = pd.DataFrame({"b": [2], "a": [1]})
     payload = export_csv(frame)
     assert payload.splitlines()[0] == b"b,a"
+
+
+# --------------------------------------------------------------------------- #
+# Header and index protection
+# --------------------------------------------------------------------------- #
+
+
+def test_sanitize_dataframe_protects_column_names() -> None:
+    frame = pd.DataFrame({"=cmd": [1], "safe": [2]})
+    sanitized = sanitize_dataframe(frame)
+    assert list(sanitized.columns) == ["'=cmd", "safe"]
+    assert list(frame.columns) == ["=cmd", "safe"]
+
+
+@pytest.mark.parametrize("name", ["=cmd", "+cmd", "-cmd", "@cmd", "  =cmd", "\t=cmd"])
+def test_sanitize_dataframe_protects_dangerous_headers(name: str) -> None:
+    frame = pd.DataFrame({name: [1]})
+    sanitized = sanitize_dataframe(frame)
+    assert list(sanitized.columns) == ["'" + name]
+
+
+def test_sanitize_dataframe_keeps_non_string_headers() -> None:
+    frame = pd.DataFrame({1: [1], "safe": [2]})
+    sanitized = sanitize_dataframe(frame)
+    assert list(sanitized.columns) == [1, "safe"]
+
+
+def test_sanitize_dataframe_protects_index_values_and_name() -> None:
+    frame = pd.DataFrame({"v": [1, 2]}, index=pd.Index(["=x", "safe"], name="=idx"))
+    sanitized = sanitize_dataframe(frame, include_index=True)
+    assert sanitized.index.tolist() == ["'=x", "safe"]
+    assert sanitized.index.name == "'=idx"
+    assert frame.index.tolist() == ["=x", "safe"]
+    assert frame.index.name == "=idx"
+
+
+def test_sanitize_dataframe_leaves_index_when_not_included() -> None:
+    frame = pd.DataFrame({"v": [1, 2]}, index=pd.Index(["=x", "safe"], name="=idx"))
+    sanitized = sanitize_dataframe(frame, include_index=False)
+    assert sanitized.index.tolist() == ["=x", "safe"]
+    assert sanitized.index.name == "=idx"
+
+
+def test_sanitize_dataframe_keeps_numeric_index_untouched() -> None:
+    frame = pd.DataFrame({"v": [1, 2]})
+    sanitized = sanitize_dataframe(frame, include_index=True)
+    assert sanitized.index.tolist() == [0, 1]
+
+
+def test_sanitize_dataframe_handles_string_dtype() -> None:
+    frame = pd.DataFrame({"note": pd.Series(["=1+1", "safe"], dtype="string")})
+    sanitized = sanitize_dataframe(frame)
+    assert sanitized["note"].tolist() == ["'=1+1", "safe"]
+
+
+def test_sanitize_dataframe_handles_categorical() -> None:
+    frame = pd.DataFrame({"note": pd.Series(["=1+1", "safe", None], dtype="category")})
+    sanitized = sanitize_dataframe(frame)
+    assert sanitized["note"].tolist()[:2] == ["'=1+1", "safe"]
+
+
+def test_sanitize_dataframe_handles_categorical_index() -> None:
+    frame = pd.DataFrame({"v": [1, 2]}, index=pd.CategoricalIndex(["=x", "safe"], name="=cat"))
+    sanitized = sanitize_dataframe(frame, include_index=True)
+    assert sanitized.index.tolist() == ["'=x", "safe"]
+    assert sanitized.index.name == "'=cat"
+
+
+def test_export_protects_header_and_index() -> None:
+    frame = pd.DataFrame(
+        {"=value": ["=1+1", "safe"]},
+        index=pd.Index(["=row", "row2"], name="=id"),
+    )
+    text = export_csv(frame, include_index=True).decode("utf-8")
+    assert "'=value" in text
+    assert "'=row" in text
+    assert "'=id" in text
+
+
+def test_export_can_disable_protection_for_header_and_index() -> None:
+    frame = pd.DataFrame({"=value": ["=1+1"]}, index=pd.Index(["=row"], name="=id"))
+    text = export_csv(frame, include_index=True, protect_formulas=False).decode("utf-8")
+    assert "=value" in text
+    assert "'=value" not in text
+    assert "=row" in text
+    assert "'=row" not in text
+
+
+def test_export_negative_numbers_not_corrupted() -> None:
+    frame = pd.DataFrame({"value": [-5.0, 3.0]})
+    assert export_csv(frame) == b"value\n-5.0\n3.0\n"
+
+
+def test_export_multiindex_header_and_index_protected() -> None:
+    index = pd.MultiIndex.from_tuples([("=a", 1)], names=["=lvl0", "lvl1"])
+    frame = pd.DataFrame({"=col": ["=x"]}, index=index)
+    text = export_csv(frame, include_index=True).decode("utf-8")
+    assert "'=lvl0" in text
+    assert "'=a" in text
+    assert "'=col" in text
+    assert "'=x" in text
+
+
+def test_sanitize_dataframe_does_not_mutate_headers_or_index() -> None:
+    frame = pd.DataFrame({"=col": ["=1+1"]}, index=pd.Index(["=row"], name="=id"))
+    original_columns = list(frame.columns)
+    original_index = frame.index.tolist()
+    original_name = frame.index.name
+    sanitize_dataframe(frame, include_index=True)
+    assert list(frame.columns) == original_columns
+    assert frame.index.tolist() == original_index
+    assert frame.index.name == original_name

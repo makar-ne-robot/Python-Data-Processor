@@ -8,6 +8,7 @@ stack.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -53,6 +54,29 @@ def count_missing(dataframe: pd.DataFrame, columns: list[str] | None = None) -> 
     return _missing_counts(dataframe, resolved)
 
 
+def _validate_threshold(threshold_pct: float) -> float:
+    """Validate and normalise a missing-value threshold in percent.
+
+    Args:
+        threshold_pct: Threshold in percent (0-100).
+
+    Returns:
+        The threshold as a finite float.
+
+    Raises:
+        CleaningError: If the value is not a finite number in ``[0, 100]``.
+    """
+    try:
+        value = float(threshold_pct)
+    except (TypeError, ValueError) as exc:
+        raise CleaningError(
+            "Missing threshold must be a number between 0 and 100 percent."
+        ) from exc
+    if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+        raise CleaningError("Missing threshold must be between 0 and 100 percent.")
+    return value
+
+
 def columns_above_missing_threshold(dataframe: pd.DataFrame, threshold_pct: float) -> list[str]:
     """Return columns whose missing share is greater than ``threshold_pct``.
 
@@ -64,15 +88,14 @@ def columns_above_missing_threshold(dataframe: pd.DataFrame, threshold_pct: floa
         Names of the offending columns.
 
     Raises:
-        CleaningError: If the threshold is outside ``[0, 100]``.
+        CleaningError: If the threshold is not a finite number in ``[0, 100]``.
     """
-    if not 0.0 <= threshold_pct <= 100.0:
-        raise CleaningError("Missing threshold must be between 0 and 100 percent.")
+    threshold = _validate_threshold(threshold_pct)
     rows = len(dataframe)
     if rows == 0:
         return []
     missing_pct = dataframe.isna().mean() * 100.0
-    return [str(name) for name in missing_pct[missing_pct > threshold_pct].index]
+    return [str(name) for name in missing_pct[missing_pct > threshold].index]
 
 
 def drop_full_duplicates(dataframe: pd.DataFrame) -> CleaningResult:
@@ -163,23 +186,22 @@ def drop_columns_above_missing_threshold(
         A :class:`CleaningResult`.
 
     Raises:
-        CleaningError: If the threshold is outside ``[0, 100]``.
+        CleaningError: If the threshold is not a finite number in ``[0, 100]``.
     """
-    to_drop = columns_above_missing_threshold(dataframe, threshold_pct)
+    threshold = _validate_threshold(threshold_pct)
+    to_drop = columns_above_missing_threshold(dataframe, threshold)
     working = dataframe.drop(columns=to_drop).reset_index(drop=True)
     return CleaningResult(
         dataframe=working,
         affected_rows=0,
         affected_cells=0,
-        description=f"Dropped {len(to_drop)} column(s) above {threshold_pct:g}% missing.",
-        details={"dropped_columns": to_drop, "threshold_pct": threshold_pct},
+        description=f"Dropped {len(to_drop)} column(s) above {threshold:g}% missing.",
+        details={"dropped_columns": to_drop, "threshold_pct": threshold},
     )
 
 
 def _coerce_fill_value(series: pd.Series, value: Any) -> Any:
     """Convert a literal fill value to a type compatible with ``series``."""
-    if value is None:
-        return None
     if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
         with_missing = series.isna()
         try:
@@ -211,9 +233,12 @@ def fill_missing_with_value(
         A :class:`CleaningResult`.
 
     Raises:
-        CleaningError: If ``columns`` is empty/unknown or the value is
-            incompatible with a numeric column.
+        CleaningError: If ``value`` is ``None``, ``columns`` is empty/unknown,
+            or the value is incompatible with a numeric column.
     """
+    if value is None:
+        raise CleaningError("A fill value is required.")
+
     target_columns = (
         list(map(str, dataframe.columns))
         if columns is None

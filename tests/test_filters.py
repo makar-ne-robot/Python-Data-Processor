@@ -386,3 +386,335 @@ def test_timezone_filter_does_not_mutate_input() -> None:
     original = frame.copy(deep=True)
     apply_filters(frame, [FilterCondition("when", "on", "2023-01-02")])
     pd.testing.assert_frame_equal(frame, original)
+
+
+def test_date_filter_rejects_nonexistent_local_time() -> None:
+    # Some zones skip local midnight on a DST transition; this must surface as
+    # a FilterError rather than a raw ValueError.
+    frame = pd.DataFrame(
+        {
+            "when": pd.to_datetime(["2018-11-04 03:00", "2018-12-01 12:00"], utc=True).tz_convert(
+                "America/Sao_Paulo"
+            )
+        }
+    )
+    with pytest.raises(FilterError, match="timezone"):
+        apply_filters(frame, [FilterCondition("when", "date_between", "2018-11-04", "2018-11-04")])
+
+
+# --------------------------------------------------------------------------- #
+# Text equals / not_equals must be literal, never regular expressions
+# --------------------------------------------------------------------------- #
+
+_REGEX_METACHARACTERS = [".", "[", "]", "*", "+", "?", "\\", "(", ")", "^", "$", "|"]
+
+
+def _literal_frame() -> pd.DataFrame:
+    return pd.DataFrame({"text": ["a.b", "axb", "a[b", "a*b", "A.B", None]})
+
+
+def test_text_equals_is_literal_not_regex() -> None:
+    result = apply_filters(_literal_frame(), [FilterCondition("text", "equals", "a.b")])
+    assert set(result["text"]) == {"a.b", "A.B"}
+
+
+def test_text_equals_case_insensitive() -> None:
+    result = apply_filters(
+        _literal_frame(), [FilterCondition("text", "equals", "A.B", case_sensitive=False)]
+    )
+    assert set(result["text"]) == {"a.b", "A.B"}
+
+
+def test_text_equals_case_sensitive() -> None:
+    result = apply_filters(
+        _literal_frame(), [FilterCondition("text", "equals", "A.B", case_sensitive=True)]
+    )
+    assert result["text"].tolist() == ["A.B"]
+
+
+def test_text_equals_excludes_missing_values() -> None:
+    result = apply_filters(_literal_frame(), [FilterCondition("text", "equals", "missing")])
+    assert result.empty
+
+
+@pytest.mark.parametrize("needle", _REGEX_METACHARACTERS)
+def test_text_equals_handles_regex_metacharacters(needle: str) -> None:
+    frame = pd.DataFrame({"text": [needle, "other", None]})
+    result = apply_filters(frame, [FilterCondition("text", "equals", needle)])
+    assert result["text"].tolist() == [needle]
+
+
+def test_text_equals_does_not_match_partial_regex() -> None:
+    # The old fullmatch-based implementation treated "." as "any character".
+    frame = pd.DataFrame({"text": ["a", ".", "z", None]})
+    result = apply_filters(frame, [FilterCondition("text", "equals", ".")])
+    assert result["text"].tolist() == ["."]
+
+
+def test_text_not_equals_is_literal_and_includes_missing_values() -> None:
+    result = apply_filters(_literal_frame(), [FilterCondition("text", "not_equals", "a.b")])
+    assert set(result["text"].dropna()) == {"axb", "a[b", "a*b"}
+    # A missing value is treated as "not equal" by the negative operator.
+    assert result["text"].isna().sum() == 1
+
+
+def test_text_not_equals_case_sensitive() -> None:
+    result = apply_filters(
+        _literal_frame(), [FilterCondition("text", "not_equals", "A.B", case_sensitive=True)]
+    )
+    assert "A.B" not in set(result["text"].dropna())
+    assert "a.b" in set(result["text"].dropna())
+
+
+@pytest.mark.parametrize("needle", _REGEX_METACHARACTERS)
+def test_text_not_equals_handles_regex_metacharacters(needle: str) -> None:
+    frame = pd.DataFrame({"text": [needle, "other"]})
+    result = apply_filters(frame, [FilterCondition("text", "not_equals", needle)])
+    assert result["text"].tolist() == ["other"]
+
+
+def test_text_contains_with_metacharacter_is_literal() -> None:
+    frame = pd.DataFrame({"text": ["a[b", "axb", None]})
+    result = apply_filters(frame, [FilterCondition("text", "contains", "[")])
+    assert result["text"].tolist() == ["a[b"]
+
+
+def test_text_equals_does_not_mutate_input() -> None:
+    frame = _literal_frame()
+    original = frame.copy(deep=True)
+    apply_filters(frame, [FilterCondition("text", "equals", "a.b")])
+    pd.testing.assert_frame_equal(frame, original)
+
+
+# --------------------------------------------------------------------------- #
+# date_between must include the entire end day
+# --------------------------------------------------------------------------- #
+
+
+def _datetime_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "when": pd.to_datetime(
+                [
+                    "2023-01-01 23:59:59",
+                    "2023-01-02 00:00:00",
+                    "2023-01-02 12:30:00",
+                    "2023-01-02 23:59:59",
+                    "2023-01-03 00:00:00",
+                    None,
+                ]
+            )
+        }
+    )
+
+
+def test_date_between_includes_entire_end_day() -> None:
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-02", "2023-01-02")],
+    )
+    assert result["when"].dt.strftime("%Y-%m-%d %H:%M:%S").tolist() == [
+        "2023-01-02 00:00:00",
+        "2023-01-02 12:30:00",
+        "2023-01-02 23:59:59",
+    ]
+
+
+def test_date_between_includes_start_of_end_day() -> None:
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-02", "2023-01-02")],
+    )
+    assert pd.Timestamp("2023-01-02 00:00:00") in set(result["when"])
+
+
+def test_date_between_excludes_values_outside_range() -> None:
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-02", "2023-01-02")],
+    )
+    assert pd.Timestamp("2023-01-03 00:00:00") not in set(result["when"])
+    assert pd.Timestamp("2023-01-01 23:59:59") not in set(result["when"])
+
+
+def test_date_between_excludes_missing_values() -> None:
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-02", "2023-01-02")],
+    )
+    assert result["when"].notna().all()
+
+
+def test_date_between_multi_day_range() -> None:
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-01", "2023-01-02")],
+    )
+    assert len(result) == 4
+
+
+def test_date_between_single_start_day() -> None:
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-01", "2023-01-01")],
+    )
+    assert result["when"].dt.strftime("%Y-%m-%d %H:%M:%S").tolist() == ["2023-01-01 23:59:59"]
+
+
+def test_date_between_timezone_aware_includes_end_day() -> None:
+    frame = pd.DataFrame(
+        {
+            "when": pd.to_datetime(
+                [
+                    "2023-01-02 00:00:00",
+                    "2023-01-02 18:00:00",
+                    "2023-01-03 00:00:00",
+                ],
+                utc=True,
+            )
+        }
+    )
+    result = apply_filters(
+        frame, [FilterCondition("when", "date_between", "2023-01-02", "2023-01-02")]
+    )
+    assert len(result) == 2
+
+
+def test_date_between_berlin_series_includes_end_day() -> None:
+    frame = pd.DataFrame(
+        {
+            "when": pd.to_datetime(
+                [
+                    "2023-01-02 00:00:00",
+                    "2023-01-02 18:00:00",
+                    "2023-01-03 00:00:00",
+                ],
+                utc=True,
+            ).tz_convert("Europe/Berlin")
+        }
+    )
+    result = apply_filters(
+        frame, [FilterCondition("when", "date_between", "2023-01-02", "2023-01-02")]
+    )
+    assert len(result) == 2
+    assert str(result["when"].dt.tz) == "Europe/Berlin"
+
+
+def test_date_between_empty_series() -> None:
+    frame = pd.DataFrame({"when": pd.to_datetime([])})
+    result = apply_filters(
+        frame, [FilterCondition("when", "date_between", "2023-01-01", "2023-01-02")]
+    )
+    assert result.empty
+
+
+def test_date_between_mixed_offsets_includes_end_day() -> None:
+    frame = pd.DataFrame(
+        {
+            "when": [
+                "2023-01-02T10:00:00+02:00",
+                "2023-01-02T23:00:00+00:00",
+                "2023-01-03T00:00:00+00:00",
+            ]
+        }
+    )
+    result = apply_filters(
+        frame, [FilterCondition("when", "date_between", "2023-01-02", "2023-01-02")]
+    )
+    assert result["when"].tolist() == [
+        "2023-01-02T10:00:00+02:00",
+        "2023-01-02T23:00:00+00:00",
+    ]
+
+
+def test_date_between_handles_extreme_end_timestamp() -> None:
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-01", pd.Timestamp.max)],
+    )
+    assert len(result) == 5
+
+
+def test_date_between_handles_midnight_end_near_max() -> None:
+    end = pd.Timestamp.max.normalize()
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-01", end)],
+    )
+    assert len(result) == 5
+
+
+def test_date_between_respects_explicit_end_time() -> None:
+    # An end bound with a time is not extended to the end of the day.
+    result = apply_filters(
+        _datetime_frame(),
+        [FilterCondition("when", "date_between", "2023-01-02 00:00", "2023-01-02 06:00")],
+    )
+    assert result["when"].dt.strftime("%H:%M:%S").tolist() == ["00:00:00"]
+
+
+# --------------------------------------------------------------------------- #
+# sort_dataframe na_position contract
+# --------------------------------------------------------------------------- #
+
+
+def _na_position_frame() -> pd.DataFrame:
+    return pd.DataFrame({"a": [1, 1, 2], "b": [np.nan, 5.0, 1.0]})
+
+
+def test_sort_multiple_keys_same_na_position_first() -> None:
+    result = sort_dataframe(
+        _na_position_frame(),
+        [SortSpec("a", na_position="first"), SortSpec("b", na_position="first")],
+    )
+    # Within the a == 1 group, the NaN in the second key comes first.
+    assert pd.isna(result["b"].iloc[0])
+    assert result["b"].iloc[1] == 5.0
+
+
+def test_sort_multiple_keys_same_na_position_last() -> None:
+    result = sort_dataframe(
+        _na_position_frame(),
+        [SortSpec("a", na_position="last"), SortSpec("b", na_position="last")],
+    )
+    # Within the a == 1 group, the NaN in the second key comes last.
+    assert result["b"].iloc[0] == 5.0
+    assert pd.isna(result["b"].iloc[1])
+
+
+def test_sort_multiple_keys_conflicting_na_position_raises() -> None:
+    with pytest.raises(FilterError, match="na_position"):
+        sort_dataframe(
+            _na_position_frame(),
+            [SortSpec("a", na_position="first"), SortSpec("b", na_position="last")],
+        )
+
+
+def test_sort_mixed_type_column_raises_filter_error() -> None:
+    frame = pd.DataFrame({"x": ["a", 1, None]})
+    with pytest.raises(FilterError, match="could not be sorted"):
+        sort_dataframe(frame, [SortSpec("x")])
+
+
+# --------------------------------------------------------------------------- #
+# Numeric filters must reject NaN and infinities
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "nan", "inf", "-inf"])
+def test_numeric_filter_rejects_non_finite_values(value: object) -> None:
+    with pytest.raises(FilterError, match="finite"):
+        apply_filters(_numeric_frame(), [FilterCondition("value", ">", value)])
+
+
+def test_numeric_between_rejects_non_finite_bounds() -> None:
+    with pytest.raises(FilterError, match="finite"):
+        apply_filters(_numeric_frame(), [FilterCondition("value", "between", 0, float("inf"))])
+    with pytest.raises(FilterError, match="finite"):
+        apply_filters(_numeric_frame(), [FilterCondition("value", "between", float("nan"), 10)])
+
+
+def test_numeric_filter_handles_infinite_data_values() -> None:
+    frame = pd.DataFrame({"value": [1.0, np.inf, -np.inf, np.nan]})
+    result = apply_filters(frame, [FilterCondition("value", ">", 0)])
+    assert result["value"].tolist() == [1.0, np.inf]

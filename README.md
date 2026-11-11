@@ -71,7 +71,8 @@ top of it, and both are covered by automated tests.
 
 **Export & Reporting**
 - Export the processed data to CSV with a selectable delimiter, encoding and index.
-- Protection against CSV Formula Injection (`=`, `+`, `-`, `@`).
+- Protection against CSV Formula Injection (`=`, `+`, `-`, `@`) for cells,
+  column headers and the exported index.
 - Download the original, untouched file.
 - Generate a TXT or JSON report describing every operation that was actually
   performed, the applied filters, final statistics and any warnings/errors.
@@ -309,7 +310,8 @@ operation or **Reset data** to start over.
 ### 5. Export
 
 - Choose delimiter, encoding and whether to include the index.
-- Toggle **Protect against CSV injection** to neutralise dangerous cells.
+- Toggle **Protect against CSV injection** to neutralise dangerous text in
+  cells, headers and the index.
 - Click **Prepare CSV** and download the processed file.
 - Download the original file unchanged.
 - Generate and download a **TXT** or **JSON** processing report.
@@ -401,9 +403,11 @@ print(report.to_text())
   logged.
 - All user input is validated; errors are converted into friendly messages by
   the application's exception hierarchy.
-- The exporter provides protection against **CSV Formula Injection**: string
-  cells beginning with `=`, `+`, `-` or `@` are prefixed with an apostrophe so
-  spreadsheets treat them as text.
+- The exporter provides best-effort protection against **CSV Formula
+  Injection**: text cells, column headers and (when the index is exported) index
+  values and names beginning with `=`, `+`, `-` or `@` are prefixed with an
+  apostrophe so spreadsheets treat them as text. This is not a guarantee against
+  every spreadsheet injection technique; see the limitations below.
 - The original data is immutable from the UI's point of view, preventing
   accidental destruction of the source data.
 - No secrets are stored in the source code.
@@ -419,8 +423,11 @@ print(report.to_text())
 - Only delimited text/CSV input is supported (no Excel or JSON input).
 - Date detection and date filtering use a heuristic and may require the user to
   select the column manually for ambiguous formats.
-- Formula protection changes exported string values by adding a leading
-  apostrophe. Disable it when exporting for non-spreadsheet consumers.
+- Formula protection is best-effort: it neutralises text beginning with `=`,
+  `+`, `-` or `@` (optionally after whitespace) by adding a leading apostrophe,
+  but it does not cover every spreadsheet injection technique and the
+  apostrophe becomes part of the exported text. Disable it when exporting for
+  non-spreadsheet consumers.
 - The application has no authentication and is intended to run locally.
 - `mypy` type checking is applied to the core business-logic package; the
   Streamlit pages are covered by linting and UI tests instead.

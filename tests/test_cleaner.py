@@ -156,3 +156,40 @@ def test_operations_on_empty_frame(empty_with_columns: pd.DataFrame) -> None:
     assert drop_rows_with_missing(empty_with_columns).affected_rows == 0
     assert fill_numeric_missing(empty_with_columns, "mean").affected_cells == 0
     assert fill_categorical_missing(empty_with_columns).affected_cells == 0
+
+
+# --------------------------------------------------------------------------- #
+# Threshold and fill-value validation
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "threshold", ["abc", None, float("nan"), float("inf"), float("-inf"), -1, 101]
+)
+def test_missing_threshold_rejects_invalid_values(
+    mixed_frame: pd.DataFrame, threshold: object
+) -> None:
+    with pytest.raises(CleaningError):
+        columns_above_missing_threshold(mixed_frame, threshold)
+
+
+def test_missing_threshold_accepts_boundaries(mixed_frame: pd.DataFrame) -> None:
+    assert set(columns_above_missing_threshold(mixed_frame, 0)) == {
+        "name",
+        "age",
+        "city",
+        "amount",
+    }
+    assert columns_above_missing_threshold(mixed_frame, 100) == []
+
+
+def test_drop_columns_above_missing_threshold_rejects_invalid(
+    mixed_frame: pd.DataFrame,
+) -> None:
+    with pytest.raises(CleaningError):
+        drop_columns_above_missing_threshold(mixed_frame, "high")
+
+
+def test_fill_missing_with_value_requires_value(mixed_frame: pd.DataFrame) -> None:
+    with pytest.raises(CleaningError, match="fill value"):
+        fill_missing_with_value(mixed_frame, None)

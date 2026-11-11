@@ -6,6 +6,7 @@ independent from Streamlit so the exact same code paths are covered by tests.
 
 from __future__ import annotations
 
+import math
 import warnings
 from typing import Any, Literal
 
@@ -56,10 +57,19 @@ def _require_column(dataframe: pd.DataFrame, column: str) -> None:
 
 
 def _to_float(value: Any, *, label: str) -> float:
+    """Convert a filter value to a finite float.
+
+    ``NaN`` and infinities are rejected because comparisons with them are
+    surprising (for example ``x != nan`` is true for every number) and almost
+    never express a user's intent.
+    """
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError) as exc:
         raise FilterError(f"{label} must be a number, got {value!r}.") from exc
+    if not math.isfinite(number):
+        raise FilterError(f"{label} must be a finite number, got {value!r}.")
+    return number
 
 
 def _to_datetime_series(series: pd.Series) -> pd.Series:
@@ -120,9 +130,16 @@ def _normalize_timestamp(timestamp: pd.Timestamp, series_tz: Any) -> pd.Timestam
                 "column. Use a timezone-naive value or normalize the column."
             )
         return timestamp
-    if timestamp.tzinfo is None:
-        return timestamp.tz_localize(series_tz)
-    return timestamp.tz_convert(series_tz)
+    try:
+        if timestamp.tzinfo is None:
+            return timestamp.tz_localize(series_tz)
+        return timestamp.tz_convert(series_tz)
+    except (ValueError, OverflowError) as exc:
+        # For example a daylight-saving transition can make a local midnight
+        # nonexistent; surface it as a domain error instead of a raw ValueError.
+        raise FilterError(
+            f"The date {timestamp} cannot be used with timezone {series_tz!r}."
+        ) from exc
 
 
 def _to_timestamp(value: Any, *, label: str) -> pd.Timestamp:
@@ -133,6 +150,18 @@ def _to_timestamp(value: Any, *, label: str) -> pd.Timestamp:
     if pd.isna(timestamp):
         raise FilterError(f"{label} must be a valid date.")
     return timestamp
+
+
+def _next_day_start(timestamp: pd.Timestamp) -> pd.Timestamp | None:
+    """Return midnight at the start of the day after ``timestamp``.
+
+    ``None`` is returned when the result would overflow the timestamp range,
+    letting the caller fall back to an inclusive comparison.
+    """
+    try:
+        return timestamp.normalize() + pd.offsets.Day(1)
+    except (ValueError, OverflowError):
+        return None
 
 
 def _numeric_mask(dataframe: pd.DataFrame, condition: FilterCondition) -> pd.Series:
@@ -186,15 +215,19 @@ def _text_mask(dataframe: pd.DataFrame, condition: FilterCondition) -> pd.Series
     needle = str(condition.value)
     case = condition.case_sensitive
 
+    # Missing values never equal a literal value: positive operators exclude
+    # them, while negative operators treat a missing value as "not equal".
     if operator == "contains":
         mask = series.str.contains(needle, case=case, regex=False, na=False)
     elif operator == "not_contains":
         mask = ~series.str.contains(needle, case=case, regex=False, na=False)
         mask = mask.fillna(True)
     elif operator == "equals":
-        mask = series.str.fullmatch(needle, case=case, na=False)
+        # Literal comparison: the user's text is never treated as a regex.
+        mask = series == needle if case else series.str.lower() == needle.lower()
+        mask = mask.fillna(False)
     elif operator == "not_equals":
-        mask = ~series.str.fullmatch(needle, case=case, na=False)
+        mask = series != needle if case else series.str.lower() != needle.lower()
         mask = mask.fillna(True)
     elif operator == "starts_with":
         mask = series.str.startswith(needle, na=False)
@@ -224,7 +257,15 @@ def _date_mask(dataframe: pd.DataFrame, condition: FilterCondition) -> pd.Series
         )
         if start > end:
             start, end = end, start
-        return series.between(start, end, inclusive="both").fillna(False)
+        # A date-only end bound (midnight) includes the whole calendar day, so
+        # a range chosen with ``st.date_input`` does not stop at 00:00.  An end
+        # bound with an explicit time is respected as-is.
+        if end == end.normalize():
+            end_exclusive = _next_day_start(end)
+            if end_exclusive is not None:
+                mask = (series >= start) & (series < end_exclusive)
+                return mask.fillna(False).astype(bool)
+        return ((series >= start) & (series <= end)).fillna(False).astype(bool)
 
     timestamp = _normalize_timestamp(_to_timestamp(condition.value, label="Filter date"), series_tz)
     if operator == "before":
@@ -272,6 +313,10 @@ def apply_filters(dataframe: pd.DataFrame, conditions: list[FilterCondition]) ->
 def sort_dataframe(dataframe: pd.DataFrame, specs: list[SortSpec]) -> pd.DataFrame:
     """Sort a frame by one or more keys.
 
+    ``pandas`` applies a single ``na_position`` to the whole sort, so all sort
+    keys must agree on it.  Conflicting settings are rejected with a
+    :class:`FilterError` instead of silently honouring only the first key.
+
     Args:
         dataframe: Frame to sort.
         specs: Sort keys in priority order.
@@ -280,7 +325,9 @@ def sort_dataframe(dataframe: pd.DataFrame, specs: list[SortSpec]) -> pd.DataFra
         A new sorted frame.  The input is not modified.
 
     Raises:
-        FilterError: If a column is unknown or ``na_position`` is invalid.
+        FilterError: If a column is unknown, ``na_position`` is invalid, the
+            sort keys request different ``na_position`` values, or the data
+            cannot be compared.
     """
     if not specs:
         return dataframe.copy(deep=True)
@@ -290,13 +337,23 @@ def sort_dataframe(dataframe: pd.DataFrame, specs: list[SortSpec]) -> pd.DataFra
         if spec.na_position not in ("first", "last"):
             raise FilterError("na_position must be 'first' or 'last'.")
 
-    na_position: Literal["first", "last"] = "first" if specs[0].na_position == "first" else "last"
-    return dataframe.sort_values(
-        by=[spec.column for spec in specs],
-        ascending=[spec.ascending for spec in specs],
-        na_position=na_position,
-        kind="mergesort",
-    ).copy(deep=True)
+    na_positions = {spec.na_position for spec in specs}
+    if len(na_positions) > 1:
+        raise FilterError(
+            "All sort keys must share the same na_position because pandas applies "
+            "a single na_position to the whole sort. "
+            f"Received: {', '.join(sorted(na_positions))}."
+        )
+    na_position: Literal["first", "last"] = "first" if "first" in na_positions else "last"
+    try:
+        return dataframe.sort_values(
+            by=[spec.column for spec in specs],
+            ascending=[spec.ascending for spec in specs],
+            na_position=na_position,
+            kind="mergesort",
+        ).copy(deep=True)
+    except TypeError as exc:
+        raise FilterError(f"The data could not be sorted: {exc}") from exc
 
 
 def describe_condition(condition: FilterCondition) -> str:
