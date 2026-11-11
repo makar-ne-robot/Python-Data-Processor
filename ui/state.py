@@ -9,6 +9,7 @@ guarantees two invariants:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -41,7 +42,28 @@ _UNDO_STACK = "dpp_undo_stack"
 _VERSION = "dpp_data_version"
 _INITIALIZED = "dpp_initialized"
 
+EXPORT_CSV_KEY = "dpp_export_csv"
+EXPORT_REPORT_KEY = "dpp_export_report"
+_DERIVED_OUTPUT_KEYS = (EXPORT_CSV_KEY, EXPORT_REPORT_KEY)
+
 _MAX_UNDO = 15
+
+
+@dataclass(frozen=True, slots=True)
+class _UndoSnapshot:
+    """Complete restorable state captured before a cleaning operation.
+
+    The DataFrame is a deep copy so later operations can never modify an older
+    snapshot.  Filters, sort keys and messages are stored as tuples to make the
+    snapshot independent from the mutable session lists.
+    """
+
+    dataframe: pd.DataFrame
+    operations: tuple[OperationRecord, ...]
+    filters: tuple[FilterCondition, ...]
+    sort_specs: tuple[SortSpec, ...]
+    warnings: tuple[str, ...]
+    errors: tuple[str, ...]
 
 
 def init_state() -> None:
@@ -59,6 +81,8 @@ def init_state() -> None:
     st.session_state[_ERRORS] = []
     st.session_state[_UNDO_STACK] = []
     st.session_state[_VERSION] = 0
+    for key in _DERIVED_OUTPUT_KEYS:
+        st.session_state.pop(key, None)
     st.session_state[_INITIALIZED] = True
 
 
@@ -145,6 +169,7 @@ def add_warning(message: str) -> None:
     warnings = st.session_state.setdefault(_WARNINGS, [])
     if message not in warnings:
         warnings.append(message)
+        _bump_version()
 
 
 def add_error(message: str) -> None:
@@ -152,10 +177,11 @@ def add_error(message: str) -> None:
     errors = st.session_state.setdefault(_ERRORS, [])
     if message not in errors:
         errors.append(message)
+        _bump_version()
 
 
 def data_version() -> int:
-    """Return a counter that changes whenever the working data changes."""
+    """Return a counter that changes whenever data or the current view changes."""
     return int(st.session_state.get(_VERSION, 0))
 
 
@@ -226,6 +252,7 @@ def commit_cleaning(result: CleaningResult, *, category: str, name: str) -> Oper
 def add_filter(condition: FilterCondition) -> None:
     """Append a filter condition."""
     st.session_state[_FILTERS] = [*get_filters(), condition]
+    _bump_version()
 
 
 def remove_filter(index: int) -> None:
@@ -234,16 +261,20 @@ def remove_filter(index: int) -> None:
     if 0 <= index < len(conditions):
         del conditions[index]
         st.session_state[_FILTERS] = conditions
+        _bump_version()
 
 
 def clear_filters() -> None:
     """Remove every active filter."""
-    st.session_state[_FILTERS] = []
+    if get_filters():
+        st.session_state[_FILTERS] = []
+        _bump_version()
 
 
 def add_sort_spec(spec: SortSpec) -> None:
     """Append a sort key."""
     st.session_state[_SORT_SPECS] = [*get_sort_specs(), spec]
+    _bump_version()
 
 
 def remove_sort_spec(index: int) -> None:
@@ -252,11 +283,14 @@ def remove_sort_spec(index: int) -> None:
     if 0 <= index < len(specs):
         del specs[index]
         st.session_state[_SORT_SPECS] = specs
+        _bump_version()
 
 
 def clear_sort_specs() -> None:
     """Remove every sort key."""
-    st.session_state[_SORT_SPECS] = []
+    if get_sort_specs():
+        st.session_state[_SORT_SPECS] = []
+        _bump_version()
 
 
 def can_undo() -> bool:
@@ -265,17 +299,25 @@ def can_undo() -> bool:
 
 
 def undo_last() -> bool:
-    """Restore the previous working dataset.
+    """Restore the complete state captured before the last operation.
+
+    Besides the working DataFrame and the operation log, this restores active
+    filters, sort keys and the warning/error messages that belonged to that
+    state.
 
     Returns:
         ``True`` when a snapshot was restored.
     """
-    stack: list[tuple[pd.DataFrame, list[OperationRecord]]] = st.session_state.get(_UNDO_STACK, [])
+    stack: list[_UndoSnapshot] = st.session_state.get(_UNDO_STACK, [])
     if not stack:
         return False
-    dataframe, operations = stack.pop()
-    st.session_state[_WORKING_DF] = dataframe
-    st.session_state[_OPERATIONS] = operations
+    snapshot = stack.pop()
+    st.session_state[_WORKING_DF] = snapshot.dataframe.copy(deep=True)
+    st.session_state[_OPERATIONS] = list(snapshot.operations)
+    st.session_state[_FILTERS] = list(snapshot.filters)
+    st.session_state[_SORT_SPECS] = list(snapshot.sort_specs)
+    st.session_state[_WARNINGS] = list(snapshot.warnings)
+    st.session_state[_ERRORS] = list(snapshot.errors)
     st.session_state[_UNDO_STACK] = stack
     _drop_orphaned_views()
     _bump_version()
@@ -319,10 +361,17 @@ def _push_undo() -> None:
     working = get_working()
     if working is None:
         return
-    stack: list[tuple[pd.DataFrame, list[OperationRecord]]] = st.session_state.setdefault(
-        _UNDO_STACK, []
+    stack: list[_UndoSnapshot] = st.session_state.setdefault(_UNDO_STACK, [])
+    stack.append(
+        _UndoSnapshot(
+            dataframe=working.copy(deep=True),
+            operations=tuple(get_operations()),
+            filters=tuple(get_filters()),
+            sort_specs=tuple(get_sort_specs()),
+            warnings=tuple(get_warnings()),
+            errors=tuple(get_errors()),
+        )
     )
-    stack.append((working.copy(deep=True), get_operations()))
     if len(stack) > _MAX_UNDO:
         del stack[0]
     st.session_state[_UNDO_STACK] = stack
@@ -346,4 +395,7 @@ def _drop_orphaned_views() -> None:
 
 
 def _bump_version() -> None:
+    """Advance the state revision and drop prepared export artefacts."""
     st.session_state[_VERSION] = int(st.session_state.get(_VERSION, 0)) + 1
+    for key in _DERIVED_OUTPUT_KEYS:
+        st.session_state.pop(key, None)

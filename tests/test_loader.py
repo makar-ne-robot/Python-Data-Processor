@@ -16,6 +16,7 @@ from data_processor.exceptions import (
 from data_processor.loader import (
     detect_delimiter,
     detect_encoding,
+    detect_encoding_details,
     load_csv_bytes,
     load_csv_path,
 )
@@ -25,14 +26,156 @@ def test_detect_encoding_plain_utf8() -> None:
     assert detect_encoding(b"hello,world") == "utf-8"
 
 
+def test_detect_encoding_utf8_has_no_warning() -> None:
+    detection = detect_encoding_details("id,name\n1,Привет\n".encode())
+    assert detection.encoding == "utf-8"
+    assert detection.confidence == 1.0
+    assert detection.warning is None
+
+
 def test_detect_encoding_utf8_bom() -> None:
     raw = b"\xef\xbb\xbfid,name\n1,Anna\n"
-    assert detect_encoding(raw) == "utf-8-sig"
+    detection = detect_encoding_details(raw)
+    assert detection.encoding == "utf-8-sig"
+    assert detection.warning is None
+
+
+def test_load_utf16_bom() -> None:
+    raw = "a,b\n1,2\n".encode("utf-16")
+    detection = detect_encoding_details(raw)
+    assert detection.encoding == "utf-16"
+    loaded = load_csv_bytes(raw)
+    assert list(loaded.dataframe.columns) == ["a", "b"]
+    assert loaded.dataframe.iloc[0, 0] == 1
+
+
+def test_load_utf32_bom() -> None:
+    raw = "a,b\n1,2\n".encode("utf-32")
+    detection = detect_encoding_details(raw)
+    assert detection.encoding == "utf-32"
+    loaded = load_csv_bytes(raw)
+    assert list(loaded.dataframe.columns) == ["a", "b"]
+    assert loaded.dataframe.iloc[0, 0] == 1
 
 
 def test_detect_encoding_cp1251() -> None:
     raw = "имя,город\nАнна,Москва\n".encode("cp1251")
     assert detect_encoding(raw) == "cp1251"
+
+
+def test_detect_encoding_cp1251_with_ascii_header() -> None:
+    raw = "id,city\n1,Москва\n2,Минск\n".encode("cp1251")
+    detection = detect_encoding_details(raw)
+    assert detection.encoding == "cp1251"
+    assert detection.warning is None
+
+
+def test_detect_encoding_cp1251_realistic() -> None:
+    text = "имя,город,заметка\n1,Москва,Привет мир\n2,Минск,Спасибо\n3,Киев,Добрый день\n"
+    detection = detect_encoding_details(text.encode("cp1251"))
+    assert detection.encoding == "cp1251"
+    assert detection.confidence == 1.0
+    assert detection.warning is None
+
+
+def test_detect_encoding_cp1252_with_real_characters() -> None:
+    text = "id,city,note\n1,Zürich,Crème brûlée\n2,München,Škoda\n3,Orléans,Élève\n"
+    detection = detect_encoding_details(text.encode("cp1252"))
+    assert detection.encoding == "cp1252"
+    assert detection.warning is None
+    assert "cp1251" in detection.alternatives
+
+
+def test_load_cp1252_roundtrip() -> None:
+    text = "id,city,note\n1,Zürich,Crème brûlée\n2,München,Škoda\n3,Orléans,Élève\n"
+    loaded = load_csv_bytes(text.encode("cp1252"))
+    assert loaded.metadata.encoding == "cp1252"
+    assert loaded.dataframe["city"].tolist() == ["Zürich", "München", "Orléans"]
+    assert loaded.dataframe["note"].iloc[0] == "Crème brûlée"
+
+
+def test_load_cp1252_specific_punctuation() -> None:
+    text = "text\n\u201cHello\u201d \u2013 dash \u20ac 5\n"
+    loaded = load_csv_bytes(text.encode("cp1252"))
+    assert loaded.metadata.encoding == "cp1252"
+    assert loaded.dataframe.iloc[0, 0] == "“Hello” – dash € 5"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "id,city\n1,Москва\n2,Минск\n",
+            "cp1251",
+        ),
+        (
+            "id,city,note\n1,Zürich,Crème brûlée\n2,München,Škoda\n3,Orléans,Élève\n",
+            "cp1252",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "candidates",
+    [
+        ("utf-8", "utf-8-sig", "cp1251", "cp1252", "iso-8859-1"),
+        ("utf-8", "cp1252", "cp1251", "iso-8859-1"),
+    ],
+)
+def test_detection_is_independent_of_candidate_order(
+    text: str, expected: str, candidates: tuple[str, ...]
+) -> None:
+    encoding = expected
+    raw = text.encode(encoding)
+    detection = detect_encoding_details(raw, candidates)
+    assert detection.encoding == expected
+
+
+def test_detect_encoding_ambiguous_short_sequence() -> None:
+    raw = b"a,b\n1,\xe9\n"
+    detection = detect_encoding_details(raw)
+    assert detection.encoding in {"cp1251", "cp1252"}
+    assert detection.warning is not None
+    assert "unreliable" in detection.warning.lower()
+    assert detection.alternatives
+    assert detection.confidence < 0.5
+
+
+def test_load_reports_ambiguous_encoding_warning() -> None:
+    loaded = load_csv_bytes(b"a,b\n1,\xe9\n")
+    assert loaded.metadata.encoding in {"cp1251", "cp1252"}
+    assert loaded.warnings
+    assert "Encoding detection may be unreliable" in loaded.warnings[0]
+
+
+def test_low_evidence_encoding_gets_warning() -> None:
+    detection = detect_encoding_details("name,price\nMüller,10\nWeiß,20\n".encode("cp1252"))
+    assert detection.encoding == "cp1252"
+    assert detection.warning is not None
+
+
+def test_manual_encoding_override_skips_detection_warning() -> None:
+    raw = b"a,b\n1,\xe9\n"
+    loaded = load_csv_bytes(raw, encoding="cp1252")
+    assert loaded.metadata.encoding == "cp1252"
+    assert loaded.warnings == ()
+    assert loaded.dataframe.iloc[0, 1] == "é"
+
+
+def test_manual_encoding_override_respects_user_choice() -> None:
+    raw = b"a,b\n1,\xe9\n"
+    loaded = load_csv_bytes(raw, encoding="cp1251")
+    assert loaded.metadata.encoding == "cp1251"
+    assert loaded.dataframe.iloc[0, 1] == "й"
+
+
+def test_manual_iso_8859_1_still_supported() -> None:
+    loaded = load_csv_bytes(b"word\ncaf\xe9\n", encoding="iso-8859-1")
+    assert loaded.dataframe.iloc[0, 0] == "café"
+
+
+def test_detect_encoding_rejects_unknown_candidates() -> None:
+    with pytest.raises(DecodingError):
+        detect_encoding_details(b"a,b\n1,2\n", candidates=("not-a-codec",))
 
 
 def test_detect_encoding_exhausts_candidates() -> None:

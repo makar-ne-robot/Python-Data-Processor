@@ -63,11 +63,66 @@ def _to_float(value: Any, *, label: str) -> float:
 
 
 def _to_datetime_series(series: pd.Series) -> pd.Series:
+    """Convert a column to datetimes, handling timezone-aware values.
+
+    Mixed timezone offsets cannot be represented by a single tz-aware dtype;
+    pandas raises ``ValueError`` in that case, so the values are converted to a
+    common UTC timeline instead of crashing.  Timezones are never silently
+    discarded from an otherwise uniform tz-aware column.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         if pd.api.types.is_datetime64_any_dtype(series):
-            return pd.to_datetime(series, errors="coerce")
-        return pd.to_datetime(series, errors="coerce", format="mixed")
+            parsed = pd.to_datetime(series, errors="coerce")
+        else:
+            try:
+                parsed = pd.to_datetime(series, errors="coerce", format="mixed")
+            except ValueError:
+                try:
+                    parsed = pd.to_datetime(series, errors="coerce", format="mixed", utc=True)
+                except (ValueError, TypeError) as exc:
+                    raise FilterError(
+                        "The date column contains values with incompatible time zones."
+                    ) from exc
+
+    if not pd.api.types.is_datetime64_any_dtype(parsed):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                parsed = pd.to_datetime(parsed, errors="coerce", utc=True)
+        except (ValueError, TypeError) as exc:
+            raise FilterError("The date column could not be interpreted as dates.") from exc
+
+    if not pd.api.types.is_datetime64_any_dtype(parsed):
+        raise FilterError("The date column could not be interpreted as dates.")
+    return parsed
+
+
+def _series_timezone(series: pd.Series) -> Any:
+    """Return the timezone of a datetime series, or ``None`` when naive."""
+    if isinstance(series.dtype, pd.DatetimeTZDtype):
+        return series.dt.tz
+    return None
+
+
+def _normalize_timestamp(timestamp: pd.Timestamp, series_tz: Any) -> pd.Timestamp:
+    """Make a filter timestamp comparable with a datetime series.
+
+    Naive values (for example from ``st.date_input``) are interpreted in the
+    series' timezone.  Aware values are converted to it.  Comparing an aware
+    value with a naive column is rejected explicitly instead of silently
+    dropping or misinterpreting the timezone.
+    """
+    if series_tz is None:
+        if timestamp.tzinfo is not None:
+            raise FilterError(
+                "Cannot compare a timezone-aware date with a timezone-naive "
+                "column. Use a timezone-naive value or normalize the column."
+            )
+        return timestamp
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize(series_tz)
+    return timestamp.tz_convert(series_tz)
 
 
 def _to_timestamp(value: Any, *, label: str) -> pd.Timestamp:
@@ -101,7 +156,9 @@ def _numeric_mask(dataframe: pd.DataFrame, condition: FilterCondition) -> pd.Ser
         ">": series > value,
         "<": series < value,
         "==": series == value,
-        "!=": series != value,
+        # NaN != value evaluates to True in pandas, so explicitly exclude
+        # missing values from a "not equal" filter.
+        "!=": series.notna() & (series != value),
     }
     return masks[operator].fillna(False).astype(bool)
 
@@ -157,16 +214,19 @@ def _date_mask(dataframe: pd.DataFrame, condition: FilterCondition) -> pd.Series
     if operator not in DATE_OPERATORS:
         raise FilterError(f"Unsupported date operator: {operator!r}")
     series = _to_datetime_series(dataframe[condition.column])
+    series_tz = _series_timezone(series)
     if operator == "date_between":
         if condition.second_value is None:
             raise FilterError("A date range needs both a start and an end date.")
-        start = _to_timestamp(condition.value, label="Start date")
-        end = _to_timestamp(condition.second_value, label="End date")
+        start = _normalize_timestamp(_to_timestamp(condition.value, label="Start date"), series_tz)
+        end = _normalize_timestamp(
+            _to_timestamp(condition.second_value, label="End date"), series_tz
+        )
         if start > end:
             start, end = end, start
         return series.between(start, end, inclusive="both").fillna(False)
 
-    timestamp = _to_timestamp(condition.value, label="Filter date")
+    timestamp = _normalize_timestamp(_to_timestamp(condition.value, label="Filter date"), series_tz)
     if operator == "before":
         mask = series < timestamp
     elif operator == "after":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -200,3 +201,188 @@ def test_describe_condition_date_and_text() -> None:
     assert "is between (date)" in date_text
     text = describe_condition(FilterCondition("name", "contains", "an"))
     assert "case-insensitive" in text
+
+
+# --------------------------------------------------------------------------- #
+# Numeric "!=" must not include missing values
+# --------------------------------------------------------------------------- #
+
+
+def _numeric_frame() -> pd.DataFrame:
+    return pd.DataFrame({"value": [10.0, 20.0, np.nan, 10.0, np.nan, 30.0]})
+
+
+def test_numeric_not_equal_regular_values() -> None:
+    result = apply_filters(_numeric_frame(), [FilterCondition("value", "!=", 10)])
+    assert result["value"].tolist() == [20.0, 30.0]
+
+
+def test_numeric_not_equal_excludes_nan() -> None:
+    result = apply_filters(_numeric_frame(), [FilterCondition("value", "!=", 10)])
+    assert not result["value"].isna().any()
+
+
+def test_numeric_not_equal_excludes_multiple_nan() -> None:
+    frame = pd.DataFrame({"value": [1.0, np.nan, 2.0, np.nan, 3.0]})
+    result = apply_filters(frame, [FilterCondition("value", "!=", 1)])
+    assert result["value"].tolist() == [2.0, 3.0]
+    assert result["value"].isna().sum() == 0
+
+
+def test_numeric_not_equal_empty_series() -> None:
+    frame = pd.DataFrame({"value": pd.Series(dtype="float64")})
+    result = apply_filters(frame, [FilterCondition("value", "!=", 10)])
+    assert result.empty
+    assert list(result.columns) == ["value"]
+
+
+def test_numeric_not_equal_all_missing() -> None:
+    frame = pd.DataFrame({"value": [np.nan, np.nan, np.nan]})
+    result = apply_filters(frame, [FilterCondition("value", "!=", 10)])
+    assert result.empty
+
+
+def test_numeric_not_equal_coerces_non_numeric_values_to_missing() -> None:
+    frame = pd.DataFrame({"value": [10, "20", None, "not-a-number"]})
+    result = apply_filters(frame, [FilterCondition("value", "!=", 10)])
+    assert result["value"].tolist() == ["20"]
+
+
+@pytest.mark.parametrize(
+    ("operator", "value", "second_value", "expected"),
+    [
+        (">=", 10, None, [10.0, 20.0, 10.0, 30.0]),
+        ("<=", 10, None, [10.0, 10.0]),
+        (">", 10, None, [20.0, 30.0]),
+        ("<", 10, None, []),
+        ("==", 10, None, [10.0, 10.0]),
+        ("between", 10, 20, [10.0, 20.0, 10.0]),
+    ],
+)
+def test_other_numeric_operators_still_exclude_nan(
+    operator: str, value: float, second_value: float | None, expected: list[float]
+) -> None:
+    result = apply_filters(
+        _numeric_frame(), [FilterCondition("value", operator, value, second_value)]
+    )
+    assert result["value"].tolist() == expected
+    assert result["value"].isna().sum() == 0
+
+
+def test_numeric_not_equal_does_not_mutate_input() -> None:
+    frame = _numeric_frame()
+    original = frame.copy(deep=True)
+    apply_filters(frame, [FilterCondition("value", "!=", 10)])
+    pd.testing.assert_frame_equal(frame, original)
+
+
+# --------------------------------------------------------------------------- #
+# Timezone-aware date filtering
+# --------------------------------------------------------------------------- #
+
+
+def _utc_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "when": pd.to_datetime(
+                [
+                    "2023-01-01 00:00:00",
+                    "2023-01-02 00:00:00",
+                    "2023-01-03 00:00:00",
+                    None,
+                ],
+                utc=True,
+            )
+        }
+    )
+
+
+def test_date_on_utc_series_with_naive_date() -> None:
+    result = apply_filters(_utc_frame(), [FilterCondition("when", "on", "2023-01-02")])
+    assert len(result) == 1
+    assert result["when"].iloc[0] == pd.Timestamp("2023-01-02", tz="UTC")
+    assert isinstance(result["when"].dtype, pd.DatetimeTZDtype)
+    assert str(result["when"].dt.tz) == "UTC"
+
+
+def test_date_before_after_and_between_utc_series() -> None:
+    before = apply_filters(_utc_frame(), [FilterCondition("when", "before", "2023-01-02")])
+    assert before["when"].tolist() == [pd.Timestamp("2023-01-01", tz="UTC")]
+
+    after = apply_filters(_utc_frame(), [FilterCondition("when", "after", "2023-01-02")])
+    assert after["when"].tolist() == [pd.Timestamp("2023-01-03", tz="UTC")]
+
+    between = apply_filters(
+        _utc_frame(),
+        [FilterCondition("when", "date_between", "2023-01-01", "2023-01-02")],
+    )
+    assert len(between) == 2
+
+
+def test_date_filter_with_value_in_another_timezone() -> None:
+    # 01:00 in Berlin on Jan 2 is 00:00 UTC on Jan 2.
+    value = pd.Timestamp("2023-01-02 01:00", tz="Europe/Berlin")
+
+    on_result = apply_filters(_utc_frame(), [FilterCondition("when", "on", value)])
+    assert len(on_result) == 1
+    assert on_result["when"].iloc[0] == pd.Timestamp("2023-01-02", tz="UTC")
+
+    after_result = apply_filters(_utc_frame(), [FilterCondition("when", "after", value)])
+    assert after_result["when"].tolist() == [pd.Timestamp("2023-01-03", tz="UTC")]
+
+
+def test_date_filter_berlin_series_keeps_timezone() -> None:
+    frame = pd.DataFrame({"when": _utc_frame()["when"].dt.tz_convert("Europe/Berlin")})
+    result = apply_filters(frame, [FilterCondition("when", "on", "2023-01-02")])
+    assert len(result) == 1
+    assert str(result["when"].dt.tz) == "Europe/Berlin"
+    assert result["when"].dt.strftime("%Y-%m-%d").iloc[0] == "2023-01-02"
+
+
+def test_date_filter_excludes_nat_with_timezones() -> None:
+    result = apply_filters(_utc_frame(), [FilterCondition("when", "after", "2022-12-31")])
+    assert len(result) == 3
+    assert result["when"].notna().all()
+
+
+def test_date_filter_empty_timezone_aware_series() -> None:
+    frame = pd.DataFrame({"when": pd.to_datetime([], utc=True)})
+    result = apply_filters(frame, [FilterCondition("when", "on", "2023-01-01")])
+    assert result.empty
+    assert isinstance(result["when"].dtype, pd.DatetimeTZDtype)
+
+
+def test_date_filter_rejects_aware_value_for_naive_column() -> None:
+    frame = pd.DataFrame({"when": pd.to_datetime(["2023-01-01", "2023-01-02"])})
+    with pytest.raises(FilterError, match="timezone-aware"):
+        apply_filters(
+            frame,
+            [FilterCondition("when", "after", pd.Timestamp("2023-01-01", tz="UTC"))],
+        )
+
+
+def test_date_filter_mixed_offsets_are_compared_on_utc_instants() -> None:
+    frame = pd.DataFrame(
+        {
+            "when": [
+                "2023-01-01T00:00:00+02:00",
+                "2023-01-02T00:00:00+00:00",
+                None,
+            ]
+        }
+    )
+    after = apply_filters(
+        frame,
+        [FilterCondition("when", "after", "2023-01-01T00:00:00+00:00")],
+    )
+    assert after["when"].tolist() == ["2023-01-02T00:00:00+00:00"]
+
+    on_result = apply_filters(frame, [FilterCondition("when", "on", "2023-01-02")])
+    assert on_result["when"].tolist() == ["2023-01-02T00:00:00+00:00"]
+
+
+def test_timezone_filter_does_not_mutate_input() -> None:
+    frame = _utc_frame()
+    original = frame.copy(deep=True)
+    apply_filters(frame, [FilterCondition("when", "on", "2023-01-02")])
+    pd.testing.assert_frame_equal(frame, original)

@@ -110,3 +110,16 @@ def test_detect_datetime_columns(mixed_frame: pd.DataFrame) -> None:
 def test_detect_datetime_columns_invalid_threshold(mixed_frame: pd.DataFrame) -> None:
     with pytest.raises(ValueError):
         detect_datetime_columns(mixed_frame, threshold=0.0)
+
+
+def test_detect_datetime_columns_with_mixed_offsets() -> None:
+    frame = pd.DataFrame(
+        {
+            "when": [
+                "2023-01-01T00:00:00+02:00",
+                "2023-01-02T00:00:00+00:00",
+                "2023-01-03T00:00:00-05:00",
+            ]
+        }
+    )
+    assert "when" in detect_datetime_columns(frame)

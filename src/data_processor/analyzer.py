@@ -157,7 +157,11 @@ def detect_datetime_columns(
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
+                try:
+                    parsed = pd.to_datetime(sample, errors="coerce", format="mixed")
+                except ValueError:
+                    # Mixed UTC offsets require a common timeline.
+                    parsed = pd.to_datetime(sample, errors="coerce", format="mixed", utc=True)
         except (ValueError, TypeError):
             continue
         ratio = float(parsed.notna().mean())
